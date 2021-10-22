@@ -9,7 +9,7 @@ from PIL import Image
 from torchvision.transforms import Compose, Resize, CenterCrop, ToTensor, Normalize
 from tqdm import tqdm
 
-from .model import build_model
+from .model import build_model, CLIP
 from .simple_tokenizer import SimpleTokenizer as _Tokenizer
 
 try:
@@ -23,7 +23,7 @@ if torch.__version__.split(".") < ["1", "7", "1"]:
     warnings.warn("PyTorch version 1.7.1 or higher is recommended")
 
 
-__all__ = ["available_models", "load", "tokenize"]
+__all__ = ["available_models", "load", "tokenize", "CLIP"]
 _tokenizer = _Tokenizer()
 
 _MODELS = {
@@ -34,6 +34,16 @@ _MODELS = {
     "ViT-B/32": "https://openaipublic.azureedge.net/clip/models/40d365715913c9da98579312b702a82c18be219cc2a73407c4526f58eba950af/ViT-B-32.pt",
     "ViT-B/16": "https://openaipublic.azureedge.net/clip/models/5806e77cd80f8b59890b7e101eabd078d9fb84e6937f9e85e4ecb61988df416f/ViT-B-16.pt",
 }
+
+"""
+'ViT-B/32':
+    - vision feature dim: [768, 7, 7]
+    - text feature dim: [512]
+
+'RN50':
+    - vision feature dim: []
+    - text feature dim: []
+"""
 
 
 def _download(url: str, root: str):

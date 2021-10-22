@@ -417,11 +417,19 @@ class CLIP(nn.Module):
         return self.visual.conv1.weight.dtype
 
     def encode_image(self, image, global_feats=True, downstream=False):
+        if not downstream:
+            assert global_feats, 'can only use global feature in contrastive'
+
         # feats is of shape [B, N**2, C], N == 1 or (height // patch_size)
         feats = self.visual(
             image.type(self.dtype),
             global_feats=global_feats,
             downstream=downstream)
+
+        if not downstream:
+            # no post-processing, directly return
+            return feats
+
         B, N2, C = feats.shape
         N = int(N2**0.5)
         # return of shape [B, C, N, N], mimicing a normal visual feature map
