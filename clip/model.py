@@ -470,7 +470,7 @@ class CLIP(nn.Module):
         if return_mask:  # [N, L], True is to be masked!
             padding_mask = torch.ones(x.shape[:2]).bool().to(x.device)
             for i in range(padding_mask.shape[0]):
-                padding_mask[i, :text[i].argmax().item() + 1] = True
+                padding_mask[i, :text[i].argmax().item() + 1] = False
             return x, padding_mask
 
         return x  # [B, C] or [B, L, C]
