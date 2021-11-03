@@ -435,7 +435,20 @@ class CLIP(nn.Module):
         # return of shape [B, C, N, N], mimicing a normal visual feature map
         return feats.reshape(B, N, N, C).permute(0, 3, 1, 2)
 
-    def encode_text(self, text, lin_proj=True):
+    def encode_text(self,
+                    text,
+                    lin_proj=True,
+                    per_token_emb=False,
+                    return_mask=False):
+        """Encode text features.
+
+        Args:
+            per_token_emb (bool): whether use global feature or all tokens'.
+            return_mask (bool): whether construct mask for texts to return.
+        """
+        if return_mask:
+            assert per_token_emb
+
         x = self.token_embedding(text).type(
             self.dtype)  # [batch_size, n_ctx, d_model]
 
@@ -446,14 +459,21 @@ class CLIP(nn.Module):
         x = self.ln_final(x).type(self.dtype)
 
         # x.shape = [batch_size, n_ctx, transformer.width]
-        # take features from the eot embedding (eot_token is the highest number in each sequence)
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)]
+        if not per_token_emb:
+            # take features from the eot embedding (eot_token is the highest number in each sequence)
+            x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)]
 
         if lin_proj:
             # project to embedding space for contrastive learning
             x = x @ self.text_projection
 
-        return x  # [B, C]
+        if return_mask:  # [N, L], True is to be masked!
+            padding_mask = torch.ones(x.shape[:2]).bool().to(x.device)
+            for i in range(padding_mask.shape[0]):
+                padding_mask[i, :text[i].argmax().item() + 1] = True
+            return x, padding_mask
+
+        return x  # [B, C] or [B, L, C]
 
     def forward(self, image, text):
         image_features = self.encode_image(image)
