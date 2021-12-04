@@ -299,9 +299,9 @@ class VisionTransformer(nn.Module):
 
         if not global_feats:
             # taking features from each patch
-            return self.ln_post(x[:, 1:, :])  # [B, grid**2, C]
-
-        x = self.ln_post(x[:, 0:1, :])  # taking the global feature, [B, 1, C]
+            x = self.ln_post(x[:, 1:, :])  # [B, grid**2, C]
+        else:
+            x = self.ln_post(x[:, 0:1, :])  # global feature, [B, 1, C]
 
         if downstream:
             # in downstream, we don't perform linear projection
@@ -309,7 +309,11 @@ class VisionTransformer(nn.Module):
 
         if self.proj is not None:
             # project to embedding space for contrastive learning
-            x = x[:, 0, :] @ self.proj  # [B, C']
+            if len(x.shape) == 3:
+                x = x[:, 0, :] @ self.proj  # [B, C']
+            else:
+                B, N, C = x.shape
+                x = (x.view(-1, C) @ self.proj).view(B, N, -1)  # [B, N, C']
 
         return x
 
@@ -332,6 +336,7 @@ class CLIP(nn.Module):
             transformer_layers: int):
         super().__init__()
 
+        self.vision_patch_size = vision_patch_size
         self.context_length = context_length
 
         if isinstance(vision_layers, (tuple, list)):
