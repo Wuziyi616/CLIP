@@ -309,7 +309,7 @@ class VisionTransformer(nn.Module):
 
         if self.proj is not None:
             # project to embedding space for contrastive learning
-            if len(x.shape) == 3:
+            if x.shape[1] == 1:
                 x = x[:, 0, :] @ self.proj  # [B, C']
             else:
                 B, N, C = x.shape
@@ -422,9 +422,6 @@ class CLIP(nn.Module):
         return self.visual.conv1.weight.dtype
 
     def encode_image(self, image, global_feats=True, downstream=False):
-        if not downstream:
-            assert global_feats, 'can only use global feature in contrastive'
-
         # feats is of shape [B, N**2, C], N == 1 or (height // patch_size)
         feats = self.visual(
             image.type(self.dtype),
