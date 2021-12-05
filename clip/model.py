@@ -477,23 +477,43 @@ class CLIP(nn.Module):
 
         return x  # [B, C] or [B, L, C]
 
-    def forward(self, image, text):
+    def forward(self, image, text, fix_text=False, ddp=False):
         image_features = self.encode_image(image)
-        text_features = self.encode_text(text)
+        if fix_text:
+            with torch.no_grad():
+                text_features = self.encode_text(text)
+        else:
+            text_features = self.encode_text(text)
 
         # normalized features
         image_features = image_features / image_features.norm(
             dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(
             dim=-1, keepdim=True)
+        logit_scale = self.logit_scale.exp()
+
+        # if in DDP, we return the features
+        # because we'll calculate similarity outside forward call
+        if ddp:
+            return image_features, text_features * logit_scale
 
         # cosine similarity as logits
-        logit_scale = self.logit_scale.exp()
         logits_per_image = logit_scale * image_features @ text_features.t()
         logits_per_text = logits_per_image.t()
 
-        # shape = [global_batch_size, global_batch_size]
         return logits_per_image, logits_per_text
+
+
+def freeze_text_encoder(model: CLIP):
+    for p in model.token_embedding.parameters():
+        p.requires_grad = False
+    model.positional_embedding.requires_grad = False
+    for p in model.transformer.parameters():
+        p.requires_grad = False
+    for p in model.ln_final.parameters():
+        p.requires_grad = False
+    model.text_projection.requires_grad = False
+    return model
 
 
 def convert_weights(model: nn.Module):
@@ -521,6 +541,14 @@ def convert_weights(model: nn.Module):
                     attr.data = attr.data.half()
 
     model.apply(_convert_weights_to_fp16)
+
+
+# https://github.com/openai/CLIP/issues/57
+def convert_models_to_fp32(model):
+    for p in model.parameters():
+        p.data = p.data.float()
+        if p.grad is not None:
+            p.grad.data = p.grad.data.float()
 
 
 def build_model(state_dict: dict):
