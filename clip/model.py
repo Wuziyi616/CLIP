@@ -77,42 +77,44 @@ class AttentionPool2d(nn.Module):
     def forward(self,
                 x: torch.Tensor,
                 global_feats: bool = True,
-                downstream: bool = False) -> torch.Tensor:
+                no_pool: bool = False) -> torch.Tensor:
         x = x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]).\
             permute(2, 0, 1)  # [B, C, H, W] -> [H*W, B, C]
-        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)BC
-        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)BC
-        x, _ = F.multi_head_attention_forward(
-            query=x,
-            key=x,
-            value=x,
-            embed_dim_to_check=x.shape[-1],
-            num_heads=self.num_heads,
-            q_proj_weight=self.q_proj.weight,
-            k_proj_weight=self.k_proj.weight,
-            v_proj_weight=self.v_proj.weight,
-            in_proj_weight=None,
-            in_proj_bias=torch.cat(
-                [self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
-            bias_k=None,
-            bias_v=None,
-            add_zero_attn=False,
-            dropout_p=0,
-            out_proj_weight=self.c_proj.weight,
-            out_proj_bias=self.c_proj.bias,
-            use_separate_proj_weight=True,
-            training=self.training,
-            need_weights=False)  # [H*W+1, B, C]
+        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (1+HW)BC
+        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (1+HW)BC
+
+        # from DenseCLIP, take out_proj(v_proj(img_feats))
+        if no_pool:
+            v = self.v_proj(x)
+            x = self.c_proj(v)  # [1+H*W, B, C]
+        else:
+            x, _ = F.multi_head_attention_forward(
+                query=x,
+                key=x,
+                value=x,
+                embed_dim_to_check=x.shape[-1],
+                num_heads=self.num_heads,
+                q_proj_weight=self.q_proj.weight,
+                k_proj_weight=self.k_proj.weight,
+                v_proj_weight=self.v_proj.weight,
+                in_proj_weight=None,
+                in_proj_bias=torch.cat(
+                    [self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
+                bias_k=None,
+                bias_v=None,
+                add_zero_attn=False,
+                dropout_p=0,
+                out_proj_weight=self.c_proj.weight,
+                out_proj_bias=self.c_proj.bias,
+                use_separate_proj_weight=True,
+                training=self.training,
+                need_weights=False)  # [1+H*W, B, C]
 
         if not global_feats:
             # taking feature from each patch
             return x[1:].permute(1, 0, 2)  # [B, H*W, C]
 
-        if downstream:
-            # taking global feature, keep the (fake) spatial dimension
-            return x[0:1].permute(1, 0, 2)  # [B, 1, C]
-
-        return x[0]
+        return x[0]  # [B, C]
 
 
 class ModifiedResNet(nn.Module):
@@ -169,7 +171,7 @@ class ModifiedResNet(nn.Module):
     def forward(self,
                 x: torch.Tensor,
                 global_feats: bool = True,
-                downstream: bool = False) -> torch.Tensor:
+                no_pool: bool = False) -> torch.Tensor:
 
         def stem(x):
             for conv, bn in [(self.conv1, self.bn1), (self.conv2, self.bn2),
@@ -184,9 +186,10 @@ class ModifiedResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)  # [B, C, H, W]
-        x = self.attnpool(x, global_feats=global_feats, downstream=downstream)
+        size = (x.shape[2], x.shape[3])
+        x = self.attnpool(x, global_feats=global_feats, no_pool=no_pool)
 
-        return x
+        return x, size  # [B, H*W, C] or [B, C]
 
 
 class LayerNorm(nn.LayerNorm):
@@ -281,7 +284,7 @@ class VisionTransformer(nn.Module):
     def forward(self,
                 x: torch.Tensor,
                 global_feats: bool = True,
-                downstream: bool = False) -> torch.Tensor:
+                lin_proj: bool = True) -> torch.Tensor:
         x = self.conv1(x)  # shape = [B, C (=width), grid, grid]
         x = x.reshape(x.shape[0], x.shape[1], -1)  # shape = [B, C, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [B, grid ** 2, C]
@@ -301,16 +304,12 @@ class VisionTransformer(nn.Module):
             # taking features from each patch
             x = self.ln_post(x[:, 1:, :])  # [B, grid**2, C]
         else:
-            x = self.ln_post(x[:, 0:1, :])  # global feature, [B, 1, C]
+            x = self.ln_post(x[:, 0, :])  # global feature, [B, C]
 
-        if downstream:
-            # in downstream, we don't perform linear projection
-            return x  # [B, 1, C]
-
-        if self.proj is not None:
+        if self.proj is not None and lin_proj:
             # project to embedding space for contrastive learning
-            if x.shape[1] == 1:
-                x = x[:, 0, :] @ self.proj  # [B, C']
+            if len(x.shape) == 2:
+                x = x @ self.proj  # [B, C']
             else:
                 B, N, C = x.shape
                 x = (x.view(-1, C) @ self.proj).view(B, N, -1)  # [B, N, C']
@@ -347,6 +346,7 @@ class CLIP(nn.Module):
                 heads=vision_heads,
                 input_resolution=image_resolution,
                 width=vision_width)
+            self.vit = False
         else:
             vision_heads = vision_width // 64
             self.visual = VisionTransformer(
@@ -356,6 +356,7 @@ class CLIP(nn.Module):
                 layers=vision_layers,
                 heads=vision_heads,
                 output_dim=embed_dim)
+            self.vit = True
 
         self.transformer = Transformer(
             width=transformer_width,
@@ -421,21 +422,52 @@ class CLIP(nn.Module):
     def dtype(self):
         return self.visual.conv1.weight.dtype
 
-    def encode_image(self, image, global_feats=True, downstream=False):
-        # feats is of shape [B, N**2, C], N == 1 or (height // patch_size)
-        feats = self.visual(
-            image.type(self.dtype),
-            global_feats=global_feats,
-            downstream=downstream)
+    def encode_image(self,
+                     image,
+                     global_feats=True,
+                     lin_proj=True,
+                     reshape_hw=False,
+                     res_no_pool=False):
+        """Encode image features.
 
-        if not downstream:
-            # no post-processing, directly return
-            return feats
+        Args:
+            global_feats (bool): whether take the global feature ([CLS] token).
+            lin_proj (bool): whether linear project the outpur feature.
+                Used in similarity calculation.
+            reshape_hw (bool): whether reshape the features to be [B, C, h, w]
+            res_no_pool (bool): take the feature map before AttenPool in ResNet
+                backbone. Taken from the DenseCLIP (NTU) paper.
+        """
+        assert not (global_feats and reshape_hw)
+        if self.vit:
+            # ViT
+            # [B, N**2, C] (N == height // patch_size) or [B, C]
+            feats = self.visual(
+                image.type(self.dtype),
+                global_feats=global_feats,
+                lin_proj=lin_proj)
 
-        B, N2, C = feats.shape
-        N = int(N2**0.5)
-        # return of shape [B, C, N, N], mimicing a normal visual feature map
-        return feats.reshape(B, N, N, C).permute(0, 3, 1, 2)
+            if not reshape_hw:
+                return feats
+
+            B, N2, C = feats.shape
+            N = int(N2**0.5)
+            # return of shape [B, C, N, N], mimicing a normal feature map
+            return feats.reshape(B, N, N, C).permute(0, 3, 1, 2)
+        else:
+            # ResNet
+            # [B, H*W, C] or [B, C]
+            feats, (H, W) = self.visual(
+                image.type(self.dtype),
+                global_feats=global_feats,
+                no_pool=res_no_pool)
+
+            if not reshape_hw:
+                return feats
+
+            B, _, C = feats.shape
+            # return a low resolution feature map
+            return feats.reshape(B, H, W, C).permute(0, 3, 1, 2)
 
     def encode_text(self,
                     text,
@@ -445,6 +477,8 @@ class CLIP(nn.Module):
         """Encode text features.
 
         Args:
+            lin_proj (bool): whether linear project the outpur feature.
+                Used in similarity calculation.
             per_token_emb (bool): whether use global feature or all tokens'.
             return_mask (bool): whether construct mask for texts to return.
         """
