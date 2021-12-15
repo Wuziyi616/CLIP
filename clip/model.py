@@ -81,13 +81,14 @@ class AttentionPool2d(nn.Module):
         x = x.reshape(x.shape[0], x.shape[1], x.shape[2] * x.shape[3]).\
             permute(2, 0, 1)  # [B, C, H, W] -> [H*W, B, C]
         x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (1+HW)BC
-        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (1+HW)BC
 
         # from DenseCLIP, take out_proj(v_proj(img_feats))
         if no_pool:
             v = self.v_proj(x)
             x = self.c_proj(v)  # [1+H*W, B, C]
         else:
+            x = x + self.positional_embedding[:, None, :].to(
+                x.dtype)  # (1+HW)BC
             x, _ = F.multi_head_attention_forward(
                 query=x,
                 key=x,
